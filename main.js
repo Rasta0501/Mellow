@@ -1,5 +1,5 @@
 const electron = require('electron')
-const { app, Menu, Tray, BrowserWindow, dialog, shell } = electron
+const { app, systemPreferences, Menu, Tray, BrowserWindow, dialog, shell } = electron
 const path = require('path')
 const { spawn, execSync } = require('child_process')
 const log = require('electron-log')
@@ -10,19 +10,94 @@ const fs = require('fs')
 const net = require('net')
 const util = require('util')
 const Netmask = require('netmask').Netmask
+const Store = require('electron-store')
+const AutoLaunch = require('auto-launch')
 
-// require('electron-reload')(__dirname)
+const autoLauncher = new AutoLaunch({name: 'Mellow'})
 
-let helperFiles = [
-  'geo.mmdb',
-  'geosite.dat',
-  'md5sum',
-  'route',
-  'core'
-]
+const schema = {
+  autoLaunch: {
+    type: 'boolean',
+    default: false
+  },
+  autoConnect: {
+    type: 'boolean',
+    default: false
+  },
+  dnsFallback: {
+    type: 'boolean',
+    default: false
+  },
+  loglevel: {
+    type: 'string',
+    default: 'info'
+  }
+}
+const store = new Store({name: 'preference', schema: schema})
 
-let helperResourcePath = path.join(process.resourcesPath, 'helper')
-let helperInstallPath = "/Library/Application Support/Mellow"
+function resetAutoLaunch() {
+  if (store.get('autoLaunch')) {
+    autoLauncher.isEnabled().then((isEnabled) => {
+      if (!isEnabled) {
+        // Enabled in Mellow but found disabled in system preferences.
+        autoLauncher.enable()
+      }
+    }).catch((err) => {
+      dialog.showErrorBox('Error', 'Failed to check auto launcher status.')
+    })
+  } else {
+    autoLauncher.isEnabled().then((isEnabled) => {
+      if (isEnabled) {
+        // Disabled in Mellow but found enabled in system preferences.
+        autoLauncher.disable()
+      }
+    }).catch((err) => {
+      dialog.showErrorBox('Error', 'Failed to check auto launcher status.')
+    })
+  }
+}
+
+resetAutoLaunch()
+
+var helperResourcePath
+if (app.isPackaged) {
+  helperResourcePath = path.join(process.resourcesPath, 'helper')
+} else {
+  helperResourcePath = path.join(path.join(__dirname, 'helper'), process.platform)
+  for (let f of ['geo.mmdb', 'geosite.dat']) {
+    src = path.join(path.join(__dirname, 'helper'), f)
+    dst = path.join(helperResourcePath, f)
+    if (!fs.existsSync(dst)) {
+      fs.copyFileSync(src, dst)
+    }
+  }
+}
+
+var helperInstallPath
+var helperFiles
+switch (process.platform) {
+  case 'darwin':
+    helperInstallPath = "/Library/Application Support/Mellow"
+    helperFiles = [
+      'geo.mmdb',
+      'geosite.dat',
+      'core',
+      'md5sum',
+      'route'
+    ]
+    break
+  case 'linux':
+    helperInstallPath = '/usr/local/mellow'
+    helperFiles = [
+      'geo.mmdb',
+      'geosite.dat',
+      'core',
+      'md5sum',
+      'ip'
+    ]
+    break
+}
+
 let logPath = log.transports.file.findLogPath('Mellow')
 let configFolder = app.getPath('userData')
 let configFile = path.join(configFolder, 'cfg.json')
@@ -51,13 +126,37 @@ let configTemplate = `{
         },
         {
             "protocol": "freedom",
-            "settings": {},
+            "settings": {
+              "domainStrategy": "UseIP"
+            },
             "tag": "direct"
         }
     ],
+    "dns": {
+        "servers": [
+            {
+                "address": "8.8.8.8",
+                "port": 53
+            },
+            {
+                "address": "223.5.5.5",
+                "port": 53,
+                "domains": [
+                    "geosite:cn"
+                ]
+            }
+        ]
+    },
     "routing": {
         "domainStrategy": "IPIfNonMatch",
         "rules": [
+            {
+                "ip": [
+                    "8.8.8.8/32"
+                ],
+                "type": "field",
+                "outboundTag": "proxy"
+            },
             {
                 "type": "field",
                 "domain": [
@@ -85,9 +184,24 @@ let configTemplate = `{
     }
 }`
 
-let routeCmd = path.join(helperInstallPath, 'route')
-let coreCmd = path.join(helperInstallPath, 'core')
-let md5Cmd = path.join(helperInstallPath, 'md5sum')
+var md5Cmd
+var routeCmd
+var coreCmd
+switch(process.platform) {
+  case 'linux':
+    md5Cmd = path.join(helperInstallPath, 'md5sum')
+    coreCmd = path.join(helperInstallPath, 'core')
+    routeCmd = path.join(helperInstallPath, 'ip')
+    break
+  case 'darwin':
+    md5Cmd = path.join(helperInstallPath, 'md5sum')
+    coreCmd = path.join(helperInstallPath, 'core')
+    routeCmd = path.join(helperInstallPath, 'route')
+    break
+  case 'win32':
+    coreCmd = path.join(helperResourcePath, 'core.exe')
+    break
+}
 
 let running = false
 let helperVerified = false
@@ -110,19 +224,26 @@ switch (process.platform) {
   case 'win32':
     tunName = 'mellow-tap0'
     break
+  case 'linux':
+    tunName = 'tun1'
+    break
 }
 
 let tunAddr = '10.255.0.2'
 let tunMask = '255.255.255.0'
 let tunGw = '10.255.0.1'
-let loglevel = 'info'
 var tunAddrBlock = new Netmask(tunAddr, tunMask)
 
 var trayOnIcon
 var trayOffIcon
 switch (process.platform) {
+  case 'linux':
   case 'darwin':
-    trayOnIcon = path.join(__dirname, 'assets/tray-on-icon.png')
+    if (systemPreferences.isDarkMode()) {
+      trayOnIcon = path.join(__dirname, 'assets/tray-on-icon-light.png')
+    } else {
+      trayOnIcon = path.join(__dirname, 'assets/tray-on-icon.png')
+    }
     trayOffIcon = path.join(__dirname, 'assets/tray-off-icon.png')
     break
   case 'win32':
@@ -135,6 +256,7 @@ switch (process.platform) {
   case 'darwin':
     app.dock.hide()
     break
+  case 'linux':
   case 'win32':
     break
 }
@@ -175,7 +297,7 @@ function checkHelper() {
       }
     } catch (err) {
       if (err.status == 1) {
-        dialog.showErrorBox('Error', 'Failed checksum helper files, it seems md5 or awk command is missing.')
+        dialog.showErrorBox('Error', 'Failed checksum helper files, it seems md5/md5sum or awk command is missing.')
       } else {
         log.info(err)
         return false
@@ -184,7 +306,7 @@ function checkHelper() {
   }
   return true
 }
-// Return true if the core start successfully, otherwise return false.
+
 async function startCore(callback) {
   coreInterrupt = false
 
@@ -212,8 +334,8 @@ async function startCore(callback) {
   var params
   var cmd
   switch (process.platform) {
+    case 'linux':
     case 'darwin':
-      cmd = coreCmd
       params = [
         '-tunName', tunName,
         '-tunAddr', tunAddr,
@@ -223,14 +345,11 @@ async function startCore(callback) {
         '-vconfig', configFile,
         '-proxyType', 'v2ray',
         '-relayICMP',
-        '-fakeDns',
-        '-loglevel', loglevel,
-        '-stats',
-        '-fakeDnsCacheDir', app.getPath('userData')
+        '-loglevel', store.get('loglevel'),
+        '-stats'
       ]
       break
     case 'win32':
-      cmd = path.join(helperResourcePath, 'core.exe')
       // The flag order is important, some flags won't work in specific
       // flag order, and I don't known exactly why is it.
       params = [
@@ -242,13 +361,18 @@ async function startCore(callback) {
         '-rpcPort', coreRpcPort.toString(),
         '-sendThrough', sendThrough,
         '-proxyType', 'v2ray',
+        '-relayICMP',
         '-stats',
-        '-loglevel', loglevel,
+        '-loglevel', store.get('loglevel'),
         '-vconfig', configFile
       ]
       break
   }
-  core = spawn(cmd, params)
+  if (store.get('dnsFallback')) {
+    params.push('-dnsFallback')
+  }
+
+  core = spawn(coreCmd, params)
   core.stdout.on('data', (data) => {
     log.info(data.toString())
   })
@@ -297,6 +421,7 @@ async function configRoute() {
   }
 
   switch (process.platform) {
+    case 'linux':
     case 'darwin':
       if (tunGw === null || origGw === null || origGwScope === null) {
         return
@@ -356,11 +481,14 @@ async function configRoute() {
       case 'win32':
         await sudoExec(util.format('%s %s %s', path.join(helperResourcePath, 'config_route.bat'), tunGw, origGw))
         break
+      case 'linux':
+        execSync(util.format('%s %s %s %s %s %s', path.join(helperResourcePath, 'config_route'), routeCmd, tunGw, origGw, origGwScope, sendThrough))
+        break
     }
     log.info('Set ' + tunGw + ' as the default gateway.')
-  } catch (error) {
-    log.info(error.stdout.toString())
-    log.info(error.stderr.toString())
+  } catch (err) {
+    log.info(err)
+    log.info(err)
     dialog.showErrorBox('Error', util.format('Failed to configure routes, see "%s" for more details.', logPath))
   }
   tray.setImage(trayOnIcon)
@@ -378,6 +506,9 @@ async function recoverRoute() {
           break
         case 'win32':
           await sudoExec(util.format('%s %s', path.join(helperResourcePath, 'recover_route.bat'), origGw))
+          break
+        case 'linux':
+          execSync(util.format('%s %s %s', path.join(helperResourcePath, 'recover_route'), routeCmd, sendThrough, origGw))
           break
       }
     } catch (error) {
@@ -420,16 +551,19 @@ function stopCore() {
 const delay = ms => new Promise(res => setTimeout(res, ms))
 
 async function up() {
-  if (process.platform == "darwin") {
-    if (!helperVerified) {
-      if (!checkHelper()) {
-        success = await installHelper()
-        if (!success) {
-          return
+  switch (process.platform) {
+    case 'darwin':
+    case 'linux':
+      if (!helperVerified) {
+        if (!checkHelper()) {
+          success = await installHelper()
+          if (!success) {
+            return
+          }
         }
+        helperVerified = true
       }
-      helperVerified = true
-    }
+      break
   }
 
   gw = null
@@ -497,11 +631,14 @@ async function up() {
 async function down() {
   log.info('Shutting down the core.')
 
+  // Get the gateway first since stopping the core may causes
+  // the route to be deleted.
+  gw = getDefaultGateway()
+
   if (core) {
     stopCore()
   }
 
-  gw = getDefaultGateway()
   // Recover default route only if current route is to tunGw.
   if (gw !== null && tunAddrBlock.contains(gw['gateway'])) {
     recoverRoute()
@@ -577,9 +714,22 @@ async function sudoExec(cmd) {
 
 async function installHelper() {
   log.info('Installing helper.')
-  var installer = path.join(helperResourcePath, 'install_helper')
-  cmd = util.format('"%s" "%s" "%s"', installer, helperResourcePath, helperInstallPath)
+
+  var installer
+  var cmd
+
+  if (process.platform == 'linux') {
+    let tmpResDir = '/tmp/mellow_helper_res'
+    execSync(util.format('cp -r %s %s', helperResourcePath, tmpResDir))
+    installer = path.join(tmpResDir, 'install_helper')
+    cmd = util.format('"%s" "%s" "%s"', installer, tmpResDir, helperInstallPath)
+  } else {
+    installer = path.join(helperResourcePath, 'install_helper')
+    cmd = util.format('"%s" "%s" "%s"', installer, helperResourcePath, helperInstallPath)
+  }
+
   log.info('Executing:', cmd)
+
   try {
     await sudoExec(cmd)
     log.info('Helper installed.')
@@ -593,11 +743,11 @@ async function installHelper() {
 function createTray() {
   tray = new Tray(trayOffIcon)
   contextMenu = Menu.buildFromTemplate([
-    { label: 'Start', type: 'normal', click: function() {
+    { label: 'Connect', type: 'normal', click: function() {
         up()
       }
     },
-    { label: 'Stop', type: 'normal', click: function() {
+    { label: 'Disconnect', type: 'normal', click: function() {
         down()
       }
     },
@@ -627,6 +777,70 @@ function createTray() {
       ])
     },
     { type: 'separator' },
+    {
+      label: 'Preferences',
+      type: 'submenu',
+      submenu: Menu.buildFromTemplate([
+        {
+          label: 'Auto Launch',
+          type: 'checkbox',
+          click: (item) => {
+            store.set('autoLaunch', item.checked)
+            resetAutoLaunch()
+          },
+          checked: store.get('autoLaunch')
+        },
+        {
+          label: 'Auto Connect',
+          type: 'checkbox',
+          click: (item) => { store.set('autoConnect', item.checked) },
+          checked: store.get('autoConnect')
+        },
+        {
+          label: 'Force DNS over TCP',
+          type: 'checkbox',
+          click: (item) => { store.set('dnsFallback', item.checked) },
+          checked: store.get('dnsFallback')
+        },
+        {
+          label: 'Log Level',
+          type: 'submenu',
+          submenu: Menu.buildFromTemplate([
+            {
+              label: 'debug',
+              type: 'radio',
+              click: () => { store.set('loglevel', 'debug') },
+              checked: store.get('loglevel') == 'debug'
+            },
+            {
+              label: 'info',
+              type: 'radio',
+              click: () => { store.set('loglevel', 'info') },
+              checked: store.get('loglevel') == 'info'
+            },
+            {
+              label: 'warn',
+              type: 'radio',
+              click: () => { store.set('loglevel', 'warn') },
+              checked: store.get('loglevel') == 'warn'
+            },
+            {
+              label: 'error',
+              type: 'radio',
+              click: () => { store.set('loglevel', 'error') },
+              checked: store.get('loglevel') == 'error'
+            },
+            {
+              label: 'none',
+              type: 'radio',
+              click: () => { store.set('loglevel', 'none') },
+              checked: store.get('loglevel') == 'none'
+            }
+          ])
+        }
+      ])
+    },
+    { type: 'separator' },
     { label: 'Statistics', type: 'normal', click: function() {
         if (core === null) {
           dialog.showMessageBox({message: 'Proxy is not running.'})
@@ -635,49 +849,14 @@ function createTray() {
         }
       }
     },
-    { label: 'Log', type: 'submenu', submenu: Menu.buildFromTemplate([
-        {
-          label: 'Open',
-          type: 'normal',
-          click: () => { shell.openItem(logPath) }
-        },
-        {
-          label: 'Level',
-          type: 'submenu',
-          submenu: Menu.buildFromTemplate([
-            {
-              label: 'debug',
-              type: 'radio',
-              click: () => { loglevel = 'debug' }
-            },
-            {
-              label: 'info',
-              type: 'radio',
-              click: () => { loglevel = 'info' },
-              checked: true
-            },
-            {
-              label: 'warn',
-              type: 'radio',
-              click: () => { loglevel = 'warn' }
-            },
-            {
-              label: 'error',
-              type: 'radio',
-              click: () => { loglevel = 'error' }
-            },
-            {
-              label: 'none',
-              type: 'radio',
-              click: () => { loglevel = 'none' }
-            }
-          ])
-        }
-      ])
+    {
+      label: 'Open Log',
+      type: 'normal',
+      click: () => { shell.openItem(logPath) }
     },
     { type: 'separator' },
     { label: 'About', type: 'normal', click: function() {
-        dialog.showMessageBox({ message: util.format('Mellow (v%s)', app.getVersion()) })
+        dialog.showMessageBox({ message: util.format('Mellow (v%s)\n\n%s', app.getVersion(), 'https://github.com/eycorsican/Mellow') })
       }
     },
     { type: 'separator' },
@@ -687,6 +866,7 @@ function createTray() {
       }
     }
   ])
+
   tray.setToolTip('Mellow')
   tray.setContextMenu(contextMenu)
 }
@@ -703,6 +883,10 @@ function init() {
   createTray()
   monitorPowerEvent()
   monitorRunningStatus()
+  if (store.get('autoConnect')) {
+    up()
+  }
+  log.info(util.format('Mellow (%s) started.', app.getVersion()))
 }
 
 app.on('ready', init)

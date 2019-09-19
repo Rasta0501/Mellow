@@ -1,13 +1,15 @@
 {
   "name": "Mellow",
-  "version": "0.0.8",
+  "version": "0.0.20",
   "description": "Mellow",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
     "distmac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder -m",
-    "distwin": "electron-builder -w"
+    "distwin": "electron-builder -w",
+    "distlinux": "electron-builder -l",
+    "dlgeo": "bash scripts/dl_mmdb.sh && bash scripts/dl_geosite.sh"
   },
   "keywords": [
     "proxy"
@@ -18,8 +20,10 @@
     "electron-builder": "^21.2.0"
   },
   "dependencies": {
+    "auto-launch": "^5.0.5",
     "default-gateway": "^5.0.3",
     "electron-log": "^3.0.7",
+    "electron-store": "^4.0.0",
     "netmask": "^1.0.6",
     "sudo-prompt": "^9.0.0"
   },
@@ -34,8 +38,8 @@
           "filter": [
             "core",
             "install_helper",
-            "route",
-            "md5sum"
+            "md5sum",
+            "route"
           ]
         },
         "helper/geosite.dat",
@@ -44,6 +48,7 @@
     },
     "win": {
       "icon": "assets/icon.png",
+      "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
         {
           "from": "helper/win32",
@@ -61,6 +66,26 @@
           "to": "helper/tap-windows6",
           "filter": [
             "*"
+          ]
+        },
+        "helper/geosite.dat",
+        "helper/geo.mmdb"
+      ]
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png",
+      "extraResources": [
+        {
+          "from": "helper/linux",
+          "to": "helper",
+          "filter": [
+            "config_route",
+            "recover_route",
+            "core",
+            "install_helper",
+            "md5sum",
+            "ip"
           ]
         },
         "helper/geosite.dat",
