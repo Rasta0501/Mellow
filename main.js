@@ -12,6 +12,9 @@ const util = require('util')
 const Netmask = require('netmask').Netmask
 const Store = require('electron-store')
 const AutoLaunch = require('auto-launch')
+const prompt = require('electron-prompt')
+const https = require('https')
+const semver = require('semver')
 
 const autoLauncher = new AutoLaunch({name: 'Mellow'})
 
@@ -24,6 +27,10 @@ const schema = {
     type: 'boolean',
     default: false
   },
+  checkUpdates: {
+    type: 'boolean',
+    default: true
+  },
   dnsFallback: {
     type: 'boolean',
     default: false
@@ -31,6 +38,10 @@ const schema = {
   loglevel: {
     type: 'string',
     default: 'info'
+  },
+  configUrl: {
+    type: 'string',
+    default: 'https://www.example.org/cfg.json'
   }
 }
 const store = new Store({name: 'preference', schema: schema})
@@ -740,6 +751,53 @@ async function installHelper() {
   }
 }
 
+function createConfigFileIfNotExists() {
+  if (!fs.existsSync(configFile)) {
+    if (!fs.existsSync(configFolder)) {
+      fs.mkdirSync(configFolder, { recursive: true })
+    }
+    fd = fs.openSync(configFile, 'w')
+    fs.writeSync(fd, configTemplate)
+    fs.closeSync(fd)
+  }
+}
+
+function checkForUpdates(silent) {
+  opt = {
+    headers: {
+      'User-Agent': 'Mellow'
+    }
+  }
+  https.get('https://api.github.com/repos/eycorsican/Mellow/releases/latest', opt, (res) => {
+    if (res.statusCode != 200) {
+      if (!silent) {
+        dialog.showErrorBox('Error', 'HTTP GET failed, status: ' + res.statusCode)
+      }
+      return
+    }
+    var body = ''
+    res.on('data', (data) => {
+      body += data
+    })
+    res.on('end', () => {
+      obj = JSON.parse(body)
+      latestVer = semver.clean(obj['tag_name'])
+      ver = app.getVersion()
+      if (ver != latestVer) {
+        dialog.showMessageBox({ message: util.format('A new version (%s) is available.\n\nRelease Notes:\n%s\n\nDownload: %s', latestVer, obj['body'], obj['html_url']) })
+      } else {
+        if (!silent) {
+          dialog.showMessageBox({ message: 'You are up-to-date!' })
+        }
+      }
+    })
+  }).on('error', (err) => {
+    if (!silent) {
+      dialog.showErrorBox('Error', 'HTTP GET failed: ' + err)
+    }
+  })
+}
+
 function createTray() {
   tray = new Tray(trayOffIcon)
   contextMenu = Menu.buildFromTemplate([
@@ -751,22 +809,74 @@ function createTray() {
         down()
       }
     },
+    { label: 'Reconnect', type: 'normal', click: function() {
+        down()
+        up()
+      }
+    },
     { type: 'separator' },
     { label: 'Config', type: 'submenu', submenu: Menu.buildFromTemplate([
         { label: 'Edit', type: 'normal', click: function() {
             try {
-              if (!fs.existsSync(configFile)) {
-                if (!fs.existsSync(configFolder)) {
-                  fs.mkdirSync(configFolder, { recursive: true })
-                }
-                fd = fs.openSync(configFile, 'w')
-                fs.writeSync(fd, configTemplate)
-                fs.closeSync(fd)
-              }
+              createConfigFileIfNotExists()
             } catch (err) {
               dialog.showErrorBox('Error', 'Failed to create file/folder: ' + err)
             }
             shell.openItem(configFile)
+          }
+        },
+        {
+          label: 'Download From URL',
+          type: 'normal',
+          click: () => {
+            prompt({
+              title: 'Download V2Ray Config',
+              label: 'V2Ray Config URL:',
+              value: store.get('configUrl'),
+              inputAttrs: {
+                  type: 'url'
+              }
+            })
+            .then((r) => {
+                if (r) {
+                  opt = {
+                    timeout: 15 * 1000
+                  }
+                  https.get(r, opt, (res) => {
+                    if (res.statusCode != 200) {
+                      dialog.showErrorBox('Error', 'HTTP GET failed, status: ' + res.statusCode)
+                      return
+                    }
+                    var body = ''
+                    res.on('data', (data) => {
+                      body += data
+                    })
+                    res.on('end', () => {
+                      try {
+                        createConfigFileIfNotExists()
+                      } catch (err) {
+                        dialog.showErrorBox('Error', 'Failed to create file/folder: ' + err)
+                        return
+                      }
+
+                      fd = fs.openSync(configFile, 'w')
+                      fs.writeSync(fd, body)
+                      fs.closeSync(fd)
+
+                      store.set('configUrl', r)
+                      dialog.showMessageBox({message: 'Success.'})
+                    })
+                    res.on('timeout', ()=> {
+                      dialog.showErrorBox('Error', 'HTTP GET timeout')
+                    })
+                  }).on('error', (err) => {
+                    dialog.showErrorBox('Error', 'HTTP GET failed: ' + err)
+                  })
+                }
+            })
+            .catch((err) => {
+              dialog.showErrorBox('Error', 'Failed to download config: ' + err)
+            })
           }
         },
         {
@@ -795,6 +905,12 @@ function createTray() {
           type: 'checkbox',
           click: (item) => { store.set('autoConnect', item.checked) },
           checked: store.get('autoConnect')
+        },
+        {
+          label: 'Check Updates',
+          type: 'checkbox',
+          click: (item) => { store.set('checkUpdates', item.checked) },
+          checked: store.get('checkUpdates')
         },
         {
           label: 'Force DNS over TCP',
@@ -855,6 +971,10 @@ function createTray() {
       click: () => { shell.openItem(logPath) }
     },
     { type: 'separator' },
+    { label: 'Check For Updates', type: 'normal', click: function() {
+        checkForUpdates(false)
+      }
+    },
     { label: 'About', type: 'normal', click: function() {
         dialog.showMessageBox({ message: util.format('Mellow (v%s)\n\n%s', app.getVersion(), 'https://github.com/eycorsican/Mellow') })
       }
@@ -887,6 +1007,13 @@ function init() {
     up()
   }
   log.info(util.format('Mellow (%s) started.', app.getVersion()))
+  if (store.get('checkUpdates')) {
+    checkForUpdates(true)
+  }
 }
 
 app.on('ready', init)
+
+app.on('window-all-closed', function () {
+  // Do nothing.
+})
